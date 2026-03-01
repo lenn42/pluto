@@ -1,190 +1,192 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  DEFAULT_CONFIG,
+  type Entry,
+  type ScoredEntry,
+  scoreEntryLocal,
+  scoreDayFromValues,
+  toLocalDateKey,
+} from "@/lib/scoring";
+import Link from "next/link";
 
-type Emotion = "Joy" | "Sadness" | "Anger" | "Anxiety" | "Neutral";
+const STORAGE_KEY = "vibelog_entries_v1";
 
-type Result = {
-  emotion: Emotion;
-  score: number; // 0-100
-  reason: string;
-  rewrite: string;
-};
-
-function clamp(n: number, min = 0, max = 100) {
-  return Math.max(min, Math.min(max, n));
+function uid() {
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
-// V0: simple local heuristic (placeholder for real AI)
-function analyze(text: string): Result {
-  const t = text.trim().toLowerCase();
-
-  const lex: Record<Exclude<Emotion, "Neutral">, string[]> = {
-    Joy: ["happy", "glad", "excited", "grateful", "love", "amazing", "great", "awesome"],
-    Sadness: ["sad", "down", "hurt", "lonely", "cry", "miss", "regret", "disappointed"],
-    Anger: ["angry", "mad", "furious", "annoyed", "hate", "unfair", "ridiculous"],
-    Anxiety: ["anxious", "worried", "afraid", "scared", "panic", "stressed", "nervous"],
-  };
-
-  const counts: Record<Emotion, number> = {
-    Joy: 0,
-    Sadness: 0,
-    Anger: 0,
-    Anxiety: 0,
-    Neutral: 0,
-  };
-
-  let reasonHits: string[] = [];
-
-  for (const [emo, words] of Object.entries(lex) as [Exclude<Emotion, "Neutral">, string[]][]) {
-    for (const w of words) {
-      if (t.includes(w)) {
-        counts[emo] += 1;
-        reasonHits.push(`"${w}" → ${emo}`);
-      }
-    }
+function loadEntries(): Entry[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
   }
-
-  const exclam = (t.match(/!/g) || []).length;
-  const qmark = (t.match(/\?/g) || []).length;
-
-  // pick the top emotion
-  let emotion: Emotion = "Neutral";
-  let top = 0;
-  (Object.keys(counts) as Emotion[]).forEach((e) => {
-    if (e === "Neutral") return;
-    if (counts[e] > top) {
-      top = counts[e];
-      emotion = e;
-    }
-  });
-
-  if (top === 0) emotion = "Neutral";
-
-  const score = clamp(top * 25 + exclam * 10 + qmark * 5, 0, 100);
-
-  const reason =
-    emotion === "Neutral"
-      ? "No strong emotion keywords detected."
-      : `Matched: ${reasonHits.slice(0, 4).join(", ")}${reasonHits.length > 4 ? "…" : ""}`;
-
-  const rewriteByEmotion: Record<Emotion, string> = {
-    Joy: "I feel really good about this. I wanted to share it with you and hear your thoughts.",
-    Sadness: "I’m feeling down about this. I’d appreciate understanding and a chance to talk it through.",
-    Anger: "I’m feeling frustrated. Can we focus on what happened and agree on a clear next step?",
-    Anxiety: "I’m feeling anxious about this. Can we clarify the situation and decide on a small first step?",
-    Neutral: "I want to express this clearly: what I care about is ___, and what I hope happens next is ___.",
-  };
-
-  return {
-    emotion,
-    score,
-    reason,
-    rewrite: rewriteByEmotion[emotion],
-  };
 }
 
-function badgeClass(e: Emotion) {
-  switch (e) {
-    case "Joy":
-      return "border-green-500/40 text-green-300 bg-green-500/10";
-    case "Sadness":
-      return "border-blue-500/40 text-blue-300 bg-blue-500/10";
-    case "Anger":
-      return "border-red-500/40 text-red-300 bg-red-500/10";
-    case "Anxiety":
-      return "border-yellow-500/40 text-yellow-300 bg-yellow-500/10";
-    default:
-      return "border-zinc-500/40 text-zinc-200 bg-zinc-500/10";
-  }
+function saveEntries(entries: Entry[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 }
 
 export default function Page() {
   const [text, setText] = useState("");
-  const [result, setResult] = useState<Result | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [entries, setEntries] = useState<Entry[]>([]);
 
-  const canAnalyze = text.trim().length >= 3 && !busy;
+  useEffect(() => {
+    setEntries(loadEntries());
+  }, []);
 
-  async function onAnalyze() {
-    setBusy(true);
-    try {
-      // simulate model latency (replace with real API later)
-      await new Promise((r) => setTimeout(r, 150));
-      setResult(analyze(text));
-    } finally {
-      setBusy(false);
-    }
+  const todayKey = useMemo(() => toLocalDateKey(new Date().toISOString()), []);
+  const todayEntries = useMemo(
+    () => entries.filter((e) => toLocalDateKey(e.createdAt) === todayKey),
+    [entries, todayKey]
+  );
+
+  const scoredToday: ScoredEntry[] = useMemo(() => {
+    return todayEntries.map((e) => {
+      const scored = scoreEntryLocal(e.text);
+      return {
+        ...e,
+        category: e.category ?? scored.category,
+        value: typeof e.value === "number" ? e.value : scored.value,
+      };
+    });
+  }, [todayEntries]);
+
+  const todayScore = useMemo(() => {
+    const values = scoredToday.map((e) => e.value);
+    return scoreDayFromValues(values, DEFAULT_CONFIG);
+  }, [scoredToday]);
+
+  function addEntry() {
+    const t = text.trim();
+    if (t.length < 2) return;
+
+    const now = new Date().toISOString();
+    const base: Entry = {
+      id: uid(),
+      text: t,
+      createdAt: now,
+    };
+
+    // local scoring now (replace with AI later)
+    const { category, value } = scoreEntryLocal(t);
+    const withScore: Entry = { ...base, category, value };
+
+    const next = [withScore, ...entries];
+    setEntries(next);
+    saveEntries(next);
+    setText("");
+  }
+
+  function removeEntry(id: string) {
+    const next = entries.filter((e) => e.id !== id);
+    setEntries(next);
+    saveEntries(next);
   }
 
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-2xl px-5 py-10">
-        <h1 className="text-2xl font-semibold">Emotion Analyzer</h1>
-        <p className="mt-2 text-sm text-zinc-400">
-          Simple V0 (local rules). Next step: replace with a real AI model via an API route.
-        </p>
+      <div className="mx-auto max-w-3xl px-5 py-10">
+        <header className="mb-8 flex items-start gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Vibe Log</h1>
+            <p className="mt-2 text-sm text-zinc-400">
+              Log small things you did. The app scores your day (V0 local rules).
+            </p>
+          </div>
+          <div className="ml-auto">
+            <Link
+              href="/report"
+              className="rounded-xl border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800/40"
+            >
+              View report →
+            </Link>
+          </div>
+        </header>
 
-        <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5">
-          <label className="text-sm text-zinc-300">Paste text</label>
+        {/* Input */}
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5">
+          <label className="text-sm text-zinc-300">Add a note</label>
           <textarea
-            className="mt-2 h-32 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/40 p-3 text-sm outline-none focus:border-zinc-600"
-            placeholder='Example: "I’m really stressed about tomorrow. I can’t stop worrying."'
+            className="mt-2 h-28 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/40 p-3 text-sm outline-none focus:border-zinc-600"
+            placeholder='Example: "Went for a 20 min walk" / "Stayed up until 3am scrolling"'
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
-
           <div className="mt-4 flex items-center gap-3">
             <button
-              onClick={onAnalyze}
-              disabled={!canAnalyze}
+              onClick={addEntry}
+              disabled={text.trim().length < 2}
               className="rounded-xl bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 disabled:opacity-40"
             >
-              {busy ? "Analyzing…" : "Analyze"}
+              Add
             </button>
-
-            <button
-              onClick={() => {
-                setText("");
-                setResult(null);
-              }}
-              className="rounded-xl border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800/40"
-            >
-              Reset
-            </button>
-
             <div className="ml-auto text-xs text-zinc-500">{text.trim().length} chars</div>
           </div>
-        </div>
+        </section>
 
-        {result && (
-          <div className="mt-6 grid gap-4">
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5">
-              <div className="flex items-center gap-3">
-                <span className={`rounded-full border px-3 py-1 text-xs ${badgeClass(result.emotion)}`}>
-                  {result.emotion}
-                </span>
-                <div className="text-sm text-zinc-300">
-                  Score: <span className="font-semibold text-zinc-100">{result.score}</span>/100
+        {/* Today summary */}
+        <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-medium">Today</div>
+            <div className="text-xs text-zinc-500">{todayKey}</div>
+          </div>
+
+          <div className="mt-3 text-sm text-zinc-300">
+            <span className="text-zinc-100 font-semibold">{todayScore.rawScore.toFixed(0)}</span>/100 raw score ·{" "}
+            +{todayScore.positiveSum.toFixed(1)} / -{todayScore.negativeSum.toFixed(1)} (loss aversion λ={DEFAULT_CONFIG.lambda})
+          </div>
+
+          <p className="mt-2 text-xs text-zinc-500">
+            Formula: score = 100 · sigmoid((p - λ·n)/scale), p=sum(positives), n=sum(abs(negatives))
+          </p>
+        </section>
+
+        {/* Entries */}
+        <section className="mt-6">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-sm font-medium">Today’s notes</div>
+            <div className="text-xs text-zinc-500">{scoredToday.length} items</div>
+          </div>
+
+          <div className="space-y-3">
+            {scoredToday.length === 0 && (
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5 text-sm text-zinc-400">
+                No notes yet. Add one above.
+              </div>
+            )}
+
+            {scoredToday.map((e) => (
+              <div key={e.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-4">
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-zinc-100">{e.text}</div>
+                    <div className="mt-1 text-xs text-zinc-500">
+                      {e.category} · {e.value >= 0 ? `+${e.value}` : e.value} ·{" "}
+                      {new Date(e.createdAt).toLocaleTimeString()}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeEntry(e.id)}
+                    className="rounded-xl border border-zinc-700 px-3 py-2 text-xs hover:bg-zinc-800/40"
+                  >
+                    Delete
+                  </button>
                 </div>
               </div>
-              <p className="mt-3 text-sm text-zinc-300">{result.reason}</p>
-            </div>
-
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5">
-              <div className="text-sm font-medium">Healthier rewrite</div>
-              <p className="mt-2 text-sm leading-6 text-zinc-300">{result.rewrite}</p>
-              <button
-                className="mt-3 rounded-xl border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800/40"
-                onClick={async () => {
-                  await navigator.clipboard.writeText(result.rewrite);
-                }}
-              >
-                Copy
-              </button>
-            </div>
+            ))}
           </div>
-        )}
+        </section>
+
+        <footer className="mt-10 text-xs text-zinc-500">
+          Next step: replace <code>scoreEntryLocal()</code> with an AI API route that returns{" "}
+          <code>{`{category, value}`}</code> per note.
+        </footer>
       </div>
     </main>
   );
